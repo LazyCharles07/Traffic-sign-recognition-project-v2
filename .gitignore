@@ -15,11 +15,6 @@ env/
 # Jupyter
 .ipynb_checkpoints/
 
-# 本地测试输出
-test_results/
-test_results_分类/
-test_results_全流程/
-
 # 测试和工具缓存
 .pytest_cache/
 .mypy_cache/
