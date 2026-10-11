@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>路标对照</title>
+<style>
+  :root {
+    --road: #c5cfc6;
+    --ink: #17211c;
+    --plate: #f4f6f1;
+    --well: #d5ddd6;
+    --line: #17211c;
+    --muted: #4d5a53;
+    --ok: #1b5c40;
+    --miss: #8a5a12;
+    --bad: #8e1d1d;
+    --extra: #1d4c82;
+    --rough: #5c5346;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--road);
+    color: var(--ink);
+    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+    line-height: 1.45;
+  }
+  button, a { font: inherit; color: inherit; }
+  button {
+    background: var(--plate);
+    border: 2px solid var(--line);
+    cursor: pointer;
+  }
+  button:focus-visible { outline: 3px solid #1d4c82; outline-offset: 2px; }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 28px 22px 48px; }
+  header h1 {
+    margin: 0;
+    font-size: 40px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    line-height: 1;
+  }
+  header p { margin: 10px 0 0; max-width: 46em; color: var(--muted); }
+  .scenes, .methods { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .scenes button, .methods button { padding: 8px 12px; }
+  .scenes button[aria-pressed="true"],
+  .methods button[aria-pressed="true"] {
+    background: var(--ink);
+    color: #f4f6f1;
+  }
+  .slot {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 4px;
+    background: #f4f6f1;
+    color: var(--ink);
+    font-size: 12px;
+  }
+  .family { margin-top: 12px; }
+  .family h2 {
+    margin: 0 0 6px;
+    font-size: 14px;
+    font-weight: 700;
+  }
+  .gantry {
+    margin-top: 22px;
+    background: #121816;
+    padding: 12px;
+  }
+  .bar {
+    height: 8px;
+    margin-bottom: 10px;
+    background: repeating-linear-gradient(90deg, #121816 0 18px, #d7a400 18px 28px);
+  }
+  .boards {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .board {
+    background: var(--plate);
+    border: 3px solid #121816;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .board header { padding: 12px 14px 0; }
+  .board h3 { margin: 0; font-size: 22px; letter-spacing: 0.04em; }
+  .meta { margin-top: 4px; color: var(--muted); font-size: 13px; }
+  .frame {
+    margin-top: 12px;
+    height: 62vh;
+    background: var(--well);
+    border-top: 2px solid #121816;
+    border-bottom: 2px solid #121816;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+  }
+  .frame img {
+    max-width: 100%;
+    max-height: 62vh;
+    object-fit: contain;
+  }
+  .frame p { margin: 0; padding: 16px; color: var(--muted); }
+  .judge {
+    padding: 12px 14px 14px;
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+  }
+  .stamp {
+    flex: none;
+    min-width: 2.4em;
+    text-align: center;
+    padding: 2px 6px;
+    color: white;
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .stamp.ok { background: var(--ok); }
+  .stamp.miss { background: var(--miss); }
+  .stamp.bad { background: var(--bad); }
+  .stamp.extra { background: var(--extra); }
+  .stamp.rough { background: var(--rough); }
+  .judge p { margin: 0; }
+  .empty-board { padding: 28px 16px; color: var(--muted); }
+  @media (max-width: 860px) {
+    .boards { grid-template-columns: 1fr; }
+    .frame, .frame img { height: auto; max-height: 70vh; }
+    header h1 { font-size: 32px; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .frame img { transition: opacity 160ms linear; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>路标对照</h1>
+    <p>先点一张街景，再点两种识别方式。先点的放在左边，后点的放在右边。两种都已选中时，再点一种会换掉右边。</p>
+  </header>
+  <div class="scenes" id="scenes"></div>
+  <div id="families"></div>
+  <div class="gantry">
+    <div class="bar"></div>
+    <div class="boards" id="boards"></div>
+  </div>
+</div>
+<script>
+const SCENES = [
+  { id: "tongli_street", name: "同里", note: "白底红圈，里面写着停" },
+  { id: "beijing_jingshan", name: "景山", note: "禁止掉头、字牌、禁止停车叠在一根杆上" },
+  { id: "shenzhen_shenyan", name: "深圳", note: "地铁施工和限速 40" },
+  { id: "dongying_street", name: "东营", note: "一根杆上三块牌子" },
+  { id: "hangzhou_pinghai", name: "杭州", note: "近处四块，远处还有一串小牌子" },
+  { id: "beijing_no_motorbikes", name: "北京", note: "禁止摩托车，下面有号牌说明" },
+  { id: "road_signs_moon", name: "月亮", note: "限速 40 和禁止停车" }
+];
+
+const FAMILIES = [
+  {
+    id: "base",
+    title: "检测找框，分类模型写含义",
+    about: "牌子清晰、画法在训练集里时最稳。半截框能补全。没见过的画法会认错，占满画面的大牌子容易漏。",
+    methods: [
+      { id: "det", name: "检测 + 分类", file: "test_results/{scene}/01_检测.jpg" }
+    ]
+  },
+  {
+    id: "box",
+    title: "大模型找框，分类模型写含义",
+    about: "框往往更全。含义仍由分类模型决定，所以「停」这种没学过的牌子还是会认错。",
+    methods: [
+      { id: "qwen-box", name: "千问找框", file: "test_results/{scene}/02_千问.jpg" },
+      { id: "glm-box", name: "智谱找框", file: "test_results/{scene}/03_智谱.jpg" },
+      { id: "ds-box", name: "DeepSeek找框", file: "test_results/{scene}/04_DeepSeek.jpg" }
+    ]
+  },
+  {
+    id: "cls",
+    title: "检测找框，大模型写含义",
+    about: "不会多找出检测漏掉的牌子，但能读牌子上的字，也能把没把握的误框写成看不清。",
+    methods: [
+      { id: "qwen-cls", name: "千问写含义", file: "test_results_分类/{scene}/02_千问.jpg" },
+      { id: "glm-cls", name: "智谱写含义", file: "test_results_分类/{scene}/03_智谱.jpg" },
+      { id: "ds-cls", name: "DeepSeek写含义", file: "test_results_分类/{scene}/04_DeepSeek.jpg" }
+    ]
+  },
+  {
+    id: "all",
+    title: "大模型找框，也自己写含义",
+    about: "找框和读字都自己做。大牌子和特殊画法更容易补上，也会把远处的字牌一并框进来。",
+    methods: [
+      { id: "qwen-all", name: "千问全做", file: "test_results_全流程/{scene}/02_千问.jpg" },
+      { id: "glm-all", name: "智谱全做", file: "test_results_全流程/{scene}/03_智谱.jpg" },
+      { id: "ds-all", name: "DeepSeek全做", file: "test_results_全流程/{scene}/04_DeepSeek.jpg" }
+    ]
+  }
+];
+
+const NOTES = {
+  tongli_street: {
+    det: ["错", "框住了这块「停」，写成禁止向右转弯。训练集里没有这个画法。"],
+    "qwen-box": ["错", "框对了，含义仍是禁止向右转弯。这一路的含义还是分类模型在写。"],
+    "glm-box": ["错", "框对了，含义同样是禁止向右转弯。"],
+    "ds-box": ["漏", "分类模型对这个框把握不够，牌子没有留下。"],
+    "qwen-cls": ["对", "框还是检测给出的框，含义改成了禁止停车。"],
+    "glm-cls": ["对", "框不变，含义写成禁止停车。"],
+    "ds-cls": ["对", "框不变，含义写成禁止停车。"],
+    "qwen-all": ["对", "自己框住这块牌子，写成禁止停车。"],
+    "glm-all": ["对", "自己框住，写成禁止停车。"],
+    "ds-all": ["对", "自己框住，写成禁止停车。"]
+  },
+  beijing_jingshan: {
+    det: ["漏", "只框了下面的禁止停车，框偏大。上面的禁止掉头没有。"],
+    "qwen-box": ["对", "禁止掉头和禁止停车都框到了，分类也对。两块字牌没有对应的类别。"],
+    "glm-box": ["对", "两块圆牌都框到，分类也对。字牌没有单独的类别。"],
+    "ds-box": ["对", "两块圆牌都框到，分类也对。"],
+    "qwen-cls": ["漏", "只有检测给出的禁停框，写成禁止停车。禁止掉头仍然没有。"],
+    "glm-cls": ["漏", "只有下面的禁停框，写成禁止停车。"],
+    "ds-cls": ["漏", "只有下面的禁停框，写成禁止停车。"],
+    "qwen-all": ["对", "禁止掉头、大型载客汽车、禁止停车分开框出。最下面的景山后街没框。"],
+    "glm-all": ["粗", "下面的禁止停车是对的。上面合成了一句「禁止大型载客汽车掉头」，字牌没有分开。"],
+    "ds-all": ["对", "禁止掉头、大型载客汽车、禁止停车分开框出。景山后街没框。"]
+  },
+  shenzhen_shenyan: {
+    det: ["粗", "两块都框到了。三角只写成警告标志，没有写出地铁施工。"],
+    "qwen-box": ["粗", "框对，含义仍是警告标志和限速 40。"],
+    "glm-box": ["粗", "框对，含义仍是警告标志和限速 40。"],
+    "ds-box": ["粗", "框对，含义仍是警告标志和限速 40。"],
+    "qwen-cls": ["对", "框不变。三角写成地铁施工，下面是限速 40。"],
+    "glm-cls": ["对", "框不变。三角写成地铁施工，下面是限速 40。"],
+    "ds-cls": ["对", "框不变。三角写成地铁施工，下面是限速 40。"],
+    "qwen-all": ["对", "地铁施工和限速 40 都框对了。"],
+    "glm-all": ["对", "地铁施工和限速 40 都框对了。"],
+    "ds-all": ["对", "地铁施工和限速 40 都框对了。"]
+  },
+  dongying_street: {
+    det: ["多", "杆上的限速 40、禁止鸣喇叭、禁止停车都对。左缘多一条靠右侧道路行驶。"],
+    "qwen-box": ["对", "杆上三块都对，没有左缘那条误报。"],
+    "glm-box": ["漏", "禁止鸣喇叭和禁止停车对。限速 40 没框到。"],
+    "ds-box": ["错", "禁止停车对。限速 40 被认成禁止驶入，禁止鸣喇叭漏了。"],
+    "qwen-cls": ["对", "三块含义都对。左缘那条误框写成看不清。"],
+    "glm-cls": ["对", "三块含义都对。左缘误框写成看不清。"],
+    "ds-cls": ["错", "三块主标志对。左缘误框写成了人行横道。"],
+    "qwen-all": ["对", "杆上三块都对，没有左缘误报。鸣笛用的是口语。"],
+    "glm-all": ["对", "杆上三块都对，没有左缘误报。"],
+    "ds-all": ["对", "杆上三块都对，用词是禁止鸣喇叭。"]
+  },
+  hangzhou_pinghai: {
+    det: ["多", "限速 50、禁止停车、机动车行驶、非机动车行驶都对。下面多一块禁止停车。"],
+    "qwen-box": ["多", "近处四块都对。远处两块小牌子被认成机动车行驶。"],
+    "glm-box": ["漏", "禁止停车和两条蓝牌对。限速 50 漏了，远处还有小框。"],
+    "ds-box": ["漏", "禁止停车和两条蓝牌对。限速 50 漏了。"],
+    "qwen-cls": ["对", "四块主标志都对，蓝牌写成机动车道、非机动车道。多余小框写成看不清。"],
+    "glm-cls": ["对", "四块主标志都对。多余小框写成看不清。"],
+    "ds-cls": ["对", "四块主标志都对。多余小框写成看不清。"],
+    "qwen-all": ["对", "近处四块都对，没有那块多余的禁止停车。"],
+    "glm-all": ["多", "近处四块对。远处又框了步行、公共汽车和停车场，后两块叠在一起。"],
+    "ds-all": ["错", "限速 50 和禁止停车在，框偏紧。一条蓝牌写成公交专用车道，还多了待行区和停车位。"]
+  },
+  beijing_no_motorbikes: {
+    det: ["对", "含义是禁止二轮摩托车驶入。框只圈住图案，没圈满圆牌。"],
+    "qwen-box": ["对", "圈住整块圆牌，分类为禁止二轮摩托车驶入。"],
+    "glm-box": ["对", "圈住整块圆牌，分类为禁止二轮摩托车驶入。"],
+    "ds-box": ["对", "圈住整块圆牌，分类为禁止二轮摩托车驶入。"],
+    "qwen-cls": ["对", "框仍是检测的小框，写成禁止摩托车通行。"],
+    "glm-cls": ["对", "框不变，写成禁止摩托车。"],
+    "ds-cls": ["对", "框不变，写成禁止摩托车通行。"],
+    "qwen-all": ["多", "圆牌写成禁止摩托车通行，并框出京B和外埠号牌。远处多了一块指路牌。"],
+    "glm-all": ["对", "圆牌和下面的号牌都框到了，没有把远处指路牌算进来。"],
+    "ds-all": ["对", "圆牌和下面的号牌都框到了。"]
+  },
+  road_signs_moon: {
+    det: ["对", "限速 40 和禁止停车都对，框贴着牌子。"],
+    "qwen-box": ["对", "两块都框对，分类也对。"],
+    "glm-box": ["对", "两块都框对，分类也对。"],
+    "ds-box": ["对", "两块含义都对。框比圆牌略低。"],
+    "qwen-cls": ["对", "框不变，两块含义都对。"],
+    "glm-cls": ["对", "框不变，两块含义都对。"],
+    "ds-cls": ["对", "框不变，两块含义都对。"],
+    "qwen-all": ["对", "两块框和含义都对。"],
+    "glm-all": ["对", "两块框和含义都对。"],
+    "ds-all": ["对", "两块含义都对，框略偏下。"]
+  }
+};
+
+const STAMP = { 对: "ok", 漏: "miss", 错: "bad", 多: "extra", 粗: "rough" };
+const METHODS = FAMILIES.flatMap((family) => family.methods.map((method) => ({ ...method, family: family.title })));
+
+let sceneId = "tongli_street";
+let picked = ["det", "qwen-all"];
+
+function methodById(id) {
+  return METHODS.find((method) => method.id === id);
+}
+
+function sceneById(id) {
+  return SCENES.find((scene) => scene.id === id);
+}
+
+function clickScene(id) {
+  sceneId = id;
+  render();
+}
+
+function clickMethod(id) {
+  if (picked[0] === id) {
+    picked[0] = picked[1];
+    picked[1] = null;
+  } else if (picked[1] === id) {
+    picked[1] = null;
+  } else if (!picked[0]) {
+    picked[0] = id;
+  } else if (!picked[1]) {
+    picked[1] = id;
+  } else {
+    picked[1] = id;
+  }
+  render();
+}
+
+function slotLabel(id) {
+  if (picked[0] === id) return "左";
+  if (picked[1] === id) return "右";
+  return "";
+}
+
+function renderScenes() {
+  const root = document.getElementById("scenes");
+  root.replaceChildren();
+  SCENES.forEach((scene) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = scene.name;
+    button.setAttribute("aria-pressed", String(scene.id === sceneId));
+    button.title = scene.note;
+    button.addEventListener("click", () => clickScene(scene.id));
+    root.appendChild(button);
+  });
+}
+
+function renderMethods() {
+  const root = document.getElementById("families");
+  root.replaceChildren();
+  FAMILIES.forEach((family) => {
+    const section = document.createElement("section");
+    section.className = "family";
+    const title = document.createElement("h2");
+    title.textContent = family.title;
+    const row = document.createElement("div");
+    row.className = "methods";
+    family.methods.forEach((method) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.setAttribute("aria-pressed", String(picked.includes(method.id)));
+      button.addEventListener("click", () => clickMethod(method.id));
+      button.append(document.createTextNode(method.name));
+      const slot = slotLabel(method.id);
+      if (slot) {
+        const mark = document.createElement("span");
+        mark.className = "slot";
+        mark.textContent = slot;
+        button.appendChild(mark);
+      }
+      row.appendChild(button);
+    });
+    section.append(title, row);
+    root.appendChild(section);
+  });
+}
+
+function renderBoard(id) {
+  const board = document.createElement("article");
+  board.className = "board";
+  if (!id) {
+    const empty = document.createElement("p");
+    empty.className = "empty-board";
+    empty.textContent = "再点一种方式，放到这一边。";
+    board.appendChild(empty);
+    return board;
+  }
+  const method = methodById(id);
+  const scene = sceneById(sceneId);
+  const note = NOTES[sceneId][id];
+  const head = document.createElement("header");
+  const title = document.createElement("h3");
+  title.textContent = method.name;
+  const meta = document.createElement("p");
+  meta.className = "meta";
+  meta.textContent = scene.name + " · " + FAMILIES.find((family) => family.methods.some((item) => item.id === id)).about;
+  head.append(title, meta);
+  const frame = document.createElement("div");
+  frame.className = "frame";
+  const waiting = document.createElement("p");
+  waiting.textContent = "正在打开这张图";
+  const image = document.createElement("img");
+  image.alt = scene.name + "，" + method.name;
+  image.hidden = true;
+  image.addEventListener("load", () => {
+    waiting.remove();
+    image.hidden = false;
+  });
+  image.addEventListener("error", () => {
+    waiting.textContent = "找不到这张结果图。请让本页和 test_results 文件夹放在一起再打开。";
+  });
+  image.src = encodeURI(method.file.replace("{scene}", sceneId));
+  frame.append(waiting, image);
+  const judge = document.createElement("div");
+  judge.className = "judge";
+  const stamp = document.createElement("span");
+  stamp.className = "stamp " + STAMP[note[0]];
+  stamp.textContent = note[0];
+  const text = document.createElement("p");
+  text.textContent = note[1];
+  judge.append(stamp, text);
+  board.append(head, frame, judge);
+  return board;
+}
+
+function render() {
+  renderScenes();
+  renderMethods();
+  const boards = document.getElementById("boards");
+  boards.replaceChildren(renderBoard(picked[0]), renderBoard(picked[1]));
+}
+
+render();
+</script>
+</body>
+</html>
