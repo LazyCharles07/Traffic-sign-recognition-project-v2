@@ -26,6 +26,12 @@
 
 每家再加一项 `QWEN_API_KEY`、`GLM_API_KEY` 或 `DEEPSEEK_API_KEY`。
 
+### 登录和排队
+
+打开网页要先登录。账号来自 `LOGIN_USERNAME` 和 `LOGIN_PASSWORD`。这两项都没写时，用户名和密码都是 `demo`。登录后浏览器保存一张 12 小时的凭证。这是页面账号，不是三家模型的密钥。公开仓库里不要放真实密码；Ubuntu 上的 `.env` 里把 `LOGIN_PASSWORD` 和 `JWT_SECRET` 改成自己的。
+
+上传之后接口马上返回一个编号，图片进入队列，一次只识别一张。页面每隔两秒来问一次结果。本机直接运行、没有设置 `REDIS_URL` 时，队列就在这个进程里。用 Docker 启动时，Compose 会带上 Redis。图片和识别结果都不写到硬盘，编号两小时后失效。
+
 ### 对照页
 
 用浏览器打开 `对照.html`。先点一张街景，再点两种识别方式，左右并排看。图下面有一句这张图上的结果。四种做法都在里面：
@@ -56,7 +62,7 @@
 
 类别来自 Kaggle 上的 [TT100K](https://www.kaggle.com/datasets/braunge/tt100k)。只保留训练集里至少出现 100 次的类别。这一版是 50 类，编号 0 到 49，名单在 `weights/dataset.yaml`。
 
-上传的图片不会存到硬盘。网页只在本机打开，地址是 `127.0.0.1`，同一局域网里的别人打不开。
+上传的图片不会存到硬盘。本机调试和部署之后，网页都只从 `127.0.0.1` 打开。从 Windows 看 Ubuntu 上的页面，要先建 SSH 隧道，见「部署到 Ubuntu」。
 
 ## 本地运行
 
@@ -67,7 +73,60 @@ pip install -r requirements.txt
 py -3.13 demo.py --imgsz 960
 ```
 
-浏览器打开 [http://127.0.0.1:8000](http://127.0.0.1:8000)。电脑没有可用的显卡时，一张图大约要几十秒。密钥怎么填，写在上面「三个视觉大模型」一节。对照页是 `对照.html`，用浏览器直接打开，不经过这个服务。
+浏览器打开 [http://127.0.0.1:8000](http://127.0.0.1:8000)，先登录再上传。没在 `.env` 里设置账号时，用户名和密码都是 `demo`。电脑没有可用的显卡时，一张图大约要几十秒。密钥怎么填，写在上面「三个视觉大模型」一节。对照页是 `对照.html`，用浏览器直接打开，不经过这个服务，也不用登录。
+
+## 部署到 Ubuntu
+
+服务跑在 Ubuntu 上，80 端口只绑在那台电脑自己的 `127.0.0.1`。同一局域网里的别人不能直接打开。容器内部仍用 `0.0.0.0`，那只是让 nginx 容器能把请求转给识别服务，不会把 8000 端口露到局域网。
+
+从 Windows 看页面时，用 SSH 建一条隧道：Windows 的 `127.0.0.1:8080` 转到 Ubuntu 的 `127.0.0.1:80`。隧道不断，页面才能开。
+
+### Ubuntu 上
+
+1. 安装并打开 SSH 服务，让 Windows 能登进来：
+
+```bash
+sudo apt update
+sudo apt install -y openssh-server
+sudo systemctl enable --now ssh
+```
+
+查看这台电脑在局域网上的地址：
+
+```bash
+ip -4 addr
+```
+
+记下形如 `192.168.x.x` 的地址，以及登录用户名。
+
+2. 安装 Docker Engine 和 Compose 插件。项目目录里放好：
+
+- `weights/best.pt`、`weights/best_model.pth`、`weights/dataset.yaml`、`weights/mobile_sam.pt`
+- `.env`：由 `.env.example` 复制来，填上三家密钥。这个文件只留在 Ubuntu 的项目目录里，不写进镜像。
+
+3. 在项目目录启动：
+
+```bash
+docker compose up -d --build
+```
+
+第一次会下载 Python 和 CPU 版 PyTorch，镜像比较大，还要等检测模型加载。加载完成前网页还打不开。看进度：
+
+```bash
+docker compose logs -f app
+```
+
+出现监听地址后，坐在 Ubuntu 前的浏览器打开 `http://127.0.0.1/`。上传的图片不会存到硬盘。页面要先登录，没另设账号时用户名和密码都是 `demo`。上传后先拿到编号，识别在队列里一次做一张，页面过几秒再来取结果。nginx 单次请求最多等 60 秒。停掉服务：`docker compose down`。
+
+### Windows 上
+
+另开一个终端，不要关掉。把用户名和 IP 换成上一步记下的：
+
+```bash
+ssh -L 8080:127.0.0.1:80 用户名@192.168.x.x
+```
+
+登录成功后这个窗口留着。浏览器打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)。关掉这个 SSH 窗口，页面就断了。
 
 ## 训练
 

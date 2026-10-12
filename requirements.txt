@@ -7,3 +7,5 @@ python-multipart>=0.0.9
 pillow>=10.0
 pyyaml>=6.0
 numpy>=1.24
+PyJWT>=2.8
+redis>=5

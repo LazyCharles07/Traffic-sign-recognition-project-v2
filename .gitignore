@@ -24,3 +24,6 @@ env/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# 本机安装脚本，不要提交
+get-docker.sh

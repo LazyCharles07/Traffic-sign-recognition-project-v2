@@ -1,0 +1,17 @@
+.git
+.env
+.env.*
+!.env.example
+weights
+test_results
+test_results_分类
+test_results_全流程
+test_images
+kaggle
+kaggle_log.txt
+kaggle_log2.txt
+kaggle_log3.txt
+**/__pycache__
+**/*.pyc
+.venv
+venv

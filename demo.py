@@ -5,7 +5,7 @@
     pip install -r requirements.txt
     python demo.py --yolo weights/best.pt --resnet weights/best_model.pth --data weights/dataset.yaml
 
-浏览器打开 http://127.0.0.1:8000 ，上传街景图。服务只监听本机，不挂到局域网。
+浏览器打开 http://127.0.0.1:8000 ，上传街景图。本机调试默认只听 127.0.0.1。部署时加上 --host 0.0.0.0。
 预处理 Resize(224) + ToTensor + ImageNet Normalize 只作用于裁剪出的路标小图。
 检测输入边长保持训练时的 640，检测置信度下限 0.10。重叠达到 0.50 的框只留检测分更高的一个。分类裁剪相对检测框每边外扩 10%，画面上仍画原来的检测框。
 """
@@ -14,22 +14,29 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hmac
 import io
 import json
 import os
+import queue
 import re
 import threading
+import time
 import urllib.error
 import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import jwt
+import redis
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import uvicorn
 import yaml
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from PIL import Image, ImageDraw, ImageFont
 from torchvision import transforms
@@ -210,13 +217,20 @@ PAGE = """<!DOCTYPE html>
 <body>
   <header>
     <h1>路标对照</h1>
-    <p class="lead">上传一张街景。下面四张图用的是同一张照片：第一张由检测模型找框并补全，后三张由千问、智谱、DeepSeek 找框。含义都由分类模型认。</p>
+    <p class="lead">先登录。上传后先拿到一个编号，算完再显示四张图。第一张由检测模型找框并补全，后三张由千问、智谱、DeepSeek 找框。含义都由分类模型认。</p>
   </header>
   <div class="hazard" aria-hidden="true"></div>
   <main>
-    <form id="form">
+    <form id="login-form">
+      <input id="username" name="username" autocomplete="username" required placeholder="用户名">
+      <input id="password" name="password" type="password" autocomplete="current-password" required placeholder="密码">
+      <button type="submit">登录</button>
+    </form>
+    <p id="who" hidden></p>
+    <form id="form" hidden>
       <input id="file" type="file" name="file" accept="image/*" required>
       <button id="submit" type="submit">识别</button>
+      <button id="logout" type="button">退出</button>
     </form>
     <img id="chosen" alt="刚选择的图片" hidden>
     <p id="message" class="status"></p>
@@ -234,8 +248,57 @@ PAGE = """<!DOCTYPE html>
     const chosen = document.getElementById("chosen");
     const fileInput = document.getElementById("file");
     const submitButton = document.getElementById("submit");
+    const loginForm = document.getElementById("login-form");
+    const uploadForm = document.getElementById("form");
+    const who = document.getElementById("who");
     let serial = 0;
     let chosenUrl = "";
+
+    function token() {
+      return sessionStorage.getItem("token") || "";
+    }
+    function showLoggedIn() {
+      loginForm.hidden = true;
+      uploadForm.hidden = false;
+      who.hidden = false;
+      who.textContent = "已登录";
+    }
+    function showLoggedOut() {
+      sessionStorage.removeItem("token");
+      loginForm.hidden = false;
+      uploadForm.hidden = true;
+      who.hidden = true;
+    }
+    if (token()) showLoggedIn();
+    loginForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      message.className = "status";
+      message.textContent = "正在登录…";
+      try {
+        const response = await fetch("/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: document.getElementById("username").value,
+            password: document.getElementById("password").value
+          })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "登录失败");
+        sessionStorage.setItem("token", data.token);
+        showLoggedIn();
+        message.textContent = "已登录。选一张图再按识别。";
+      } catch (error) {
+        message.className = "status err";
+        message.textContent = error.message;
+      }
+    });
+    document.getElementById("logout").addEventListener("click", () => {
+      serial += 1;
+      showLoggedOut();
+      message.className = "status";
+      message.textContent = "已退出";
+    });
 
     function esc(text) {
       return String(text).replace(/[&<>"]/g, (ch) => ({
@@ -297,38 +360,71 @@ PAGE = """<!DOCTYPE html>
       message.textContent = "四张图都在识别…";
       submitButton.disabled = true;
       try {
-        const response = await fetch("/predict", { method: "POST", body: new FormData(event.target) });
+        const response = await fetch("/predict", {
+          method: "POST",
+          headers: { "Authorization": "Bearer " + token() },
+          body: new FormData(event.target)
+        });
         const data = await response.json();
         if (mySerial !== serial) return;
+        if (response.status === 401) {
+          showLoggedOut();
+          throw new Error(data.detail || "请先登录");
+        }
         if (!response.ok) throw new Error(data.detail || "识别失败");
-        (data.panels || []).forEach((panel) => {
-          const node = board.querySelector(`[data-id="${panel.id}"]`);
-          if (!node) return;
-          const img = node.querySelector("img");
-          const list = node.querySelector("ul");
-          const empty = node.querySelector(".empty");
-          if (panel.error) {
-            empty.hidden = false;
-            empty.classList.add("err");
-            empty.textContent = panel.error;
-            return;
+        message.textContent = "已排队，编号 " + data.job_id;
+        while (mySerial === serial) {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          if (mySerial !== serial) return;
+          const jobResponse = await fetch("/jobs/" + data.job_id, {
+            headers: { "Authorization": "Bearer " + token() }
+          });
+          const job = await jobResponse.json();
+          if (mySerial !== serial) return;
+          if (jobResponse.status === 401) {
+            showLoggedOut();
+            throw new Error(job.detail || "请先登录");
           }
-          img.src = "";
-          img.src = "data:image/jpeg;base64," + panel.image_base64;
-          img.hidden = false;
-          list.innerHTML = (panel.signs || []).map((sign) => {
-            const det = sign.det_conf == null ? "" : `，检测 ${Number(sign.det_conf).toFixed(2)}`;
-            return `<li>${esc(sign.meaning)} ${Number(sign.cls_conf).toFixed(2)}${det}</li>`;
-          }).join("");
-          list.hidden = !(panel.signs || []).length;
-          empty.hidden = true;
-          if (!(panel.signs || []).length) {
-            empty.hidden = false;
-            empty.classList.remove("err");
-            empty.textContent = "没有框出标志";
+          if (!jobResponse.ok) throw new Error(job.detail || "查询失败");
+          if (job.status === "queued") {
+            message.textContent = "排队中，编号 " + data.job_id;
+            continue;
           }
-        });
-        if (mySerial === serial) message.textContent = "这一张的四份结果已更新。";
+          if (job.status === "running") {
+            message.textContent = "正在识别，编号 " + data.job_id;
+            continue;
+          }
+          if (job.status === "error") throw new Error(job.error || "识别失败");
+          (job.panels || []).forEach((panel) => {
+            const node = board.querySelector(`[data-id="${panel.id}"]`);
+            if (!node) return;
+            const img = node.querySelector("img");
+            const list = node.querySelector("ul");
+            const empty = node.querySelector(".empty");
+            if (panel.error) {
+              empty.hidden = false;
+              empty.classList.add("err");
+              empty.textContent = panel.error;
+              return;
+            }
+            img.src = "";
+            img.src = "data:image/jpeg;base64," + panel.image_base64;
+            img.hidden = false;
+            list.innerHTML = (panel.signs || []).map((sign) => {
+              const det = sign.det_conf == null ? "" : `，检测 ${Number(sign.det_conf).toFixed(2)}`;
+              return `<li>${esc(sign.meaning)} ${Number(sign.cls_conf).toFixed(2)}${det}</li>`;
+            }).join("");
+            list.hidden = !(panel.signs || []).length;
+            empty.hidden = true;
+            if (!(panel.signs || []).length) {
+              empty.hidden = false;
+              empty.classList.remove("err");
+              empty.textContent = "没有框出标志";
+            }
+          });
+          if (mySerial === serial) message.textContent = "这一张的四份结果已更新。";
+          break;
+        }
       } catch (error) {
         if (mySerial !== serial) return;
         message.className = "status err";
@@ -970,37 +1066,105 @@ def encode_jpeg(image):
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-app = FastAPI(title="交通路标识别")
-STATE = {"predictor": None, "args": None}
+LOGIN_USERNAME = os.environ.get("LOGIN_USERNAME", "demo")
+LOGIN_PASSWORD = os.environ.get("LOGIN_PASSWORD", "demo")
+JWT_SECRET = os.environ.get("JWT_SECRET", "traffic-sign-demo")
+JOB_TTL = 7200
 
 
-@app.get("/", response_class=HTMLResponse)
-def index():
-    return PAGE
+class JobQueue:
+    """有 REDIS_URL 时用 Redis 排队。没有时在本进程里排队，方便本机直接启动。"""
+
+    def __init__(self):
+        url = os.environ.get("REDIS_URL", "").strip()
+        self.redis = redis.Redis.from_url(url) if url else None
+        self.local = {}
+        self.local_queue = queue.Queue()
+        self.lock = threading.Lock()
+
+    def enqueue(self, image_bytes):
+        job_id = uuid.uuid4().hex
+        if self.redis is not None:
+            self.redis.set(f"sign:image:{job_id}", image_bytes, ex=JOB_TTL)
+            self.redis.hset(f"sign:job:{job_id}", mapping={"status": "queued", "error": ""})
+            self.redis.expire(f"sign:job:{job_id}", JOB_TTL)
+            self.redis.lpush("sign:queue", job_id)
+            return job_id
+        with self.lock:
+            self.local[job_id] = {"status": "queued", "error": "", "image": image_bytes, "panels": None}
+        self.local_queue.put(job_id)
+        return job_id
+
+    def snapshot(self, job_id):
+        if self.redis is not None:
+            raw = self.redis.hgetall(f"sign:job:{job_id}")
+            if not raw:
+                return None
+            data = {key.decode(): value.decode() for key, value in raw.items()}
+            panels = data.get("panels")
+            return {
+                "status": data.get("status", ""),
+                "error": data.get("error", ""),
+                "panels": json.loads(panels) if panels else None,
+            }
+        with self.lock:
+            item = self.local.get(job_id)
+            if item is None:
+                return None
+            return {"status": item["status"], "error": item.get("error", ""), "panels": item.get("panels")}
+
+    def take(self):
+        if self.redis is not None:
+            item = self.redis.brpop("sign:queue", timeout=5)
+            if item is None:
+                return None
+            job_id = item[1].decode()
+            image = self.redis.get(f"sign:image:{job_id}")
+            self.redis.hset(f"sign:job:{job_id}", "status", "running")
+            return job_id, image
+        try:
+            job_id = self.local_queue.get(timeout=5)
+        except queue.Empty:
+            return None
+        with self.lock:
+            image = self.local[job_id].pop("image", None)
+            self.local[job_id]["status"] = "running"
+        return job_id, image
+
+    def finish(self, job_id, panels=None, error=""):
+        status = "error" if error else "done"
+        if self.redis is not None:
+            mapping = {"status": status, "error": error}
+            if panels is not None:
+                mapping["panels"] = json.dumps(panels, ensure_ascii=False)
+            self.redis.hset(f"sign:job:{job_id}", mapping=mapping)
+            self.redis.delete(f"sign:image:{job_id}")
+            return
+        with self.lock:
+            item = self.local.get(job_id)
+            if item is None:
+                return
+            item["status"] = status
+            item["error"] = error
+            item["panels"] = panels
+            item.pop("image", None)
 
 
-def panel_from_crops(predictor, image, panel_id, title, crops, error=""):
-    if error:
-        blank, _signs = predictor.draw_signs(image, [])
-        return {"id": panel_id, "title": title, "image_base64": encode_jpeg(blank), "signs": [], "error": error}
-    annotated, signs = predictor.draw_signs(image, crops)
-    return {"id": panel_id, "title": title, "image_base64": encode_jpeg(annotated), "signs": signs, "error": ""}
+JOBS = JobQueue()
 
 
-@app.post("/predict", response_class=UnicodeJSONResponse)
-async def predict_api(file: UploadFile = File(...)):
-    predictor = STATE["predictor"]
-    if predictor is None:
-        raise HTTPException(status_code=503, detail="模型尚未加载")
-    payload = await file.read()
-    if not payload:
-        raise HTTPException(status_code=400, detail="上传文件为空")
+def current_user(authorization):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="请先登录")
     try:
-        image = Image.open(io.BytesIO(payload))
-        image.load()
-        image = image.convert("RGB")
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="无法解析为图片") from exc
+        payload = jwt.decode(authorization[7:], JWT_SECRET, algorithms=["HS256"])
+    except jwt.PyJWTError as exc:
+        raise HTTPException(status_code=401, detail="登录已失效，请重新登录") from exc
+    return payload.get("sub") or ""
+
+
+def build_panels(image):
+    predictor = STATE["predictor"]
     providers = load_providers()
     copies = [image.copy() for _provider in providers]
     with ThreadPoolExecutor(max_workers=3) as pool:
@@ -1031,7 +1195,103 @@ async def predict_api(file: UploadFile = File(...)):
                     if item is not None and item["cls_conf"] >= SAM_RELIABLE
                 ]
                 panels.append(panel_from_crops(predictor, image, provider["id"], provider["title"], crops))
-    return {"panels": panels}
+    return panels
+
+
+def recognize_bytes(payload):
+    image = Image.open(io.BytesIO(payload))
+    image.load()
+    image = image.convert("RGB")
+    return build_panels(image)
+
+
+def job_worker():
+    while True:
+        try:
+            taken = JOBS.take()
+        except redis.RedisError as exc:
+            print(f"排队暂时不可用: {exc}")
+            time.sleep(2)
+            continue
+        if taken is None:
+            continue
+        job_id, payload = taken
+        if not payload:
+            JOBS.finish(job_id, error="图片已丢失")
+            continue
+        try:
+            JOBS.finish(job_id, panels=recognize_bytes(payload))
+        except Exception as exc:
+            JOBS.finish(job_id, error=str(exc))
+
+
+app = FastAPI(title="交通路标识别")
+STATE = {"predictor": None, "args": None}
+
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return PAGE
+
+
+def panel_from_crops(predictor, image, panel_id, title, crops, error=""):
+    if error:
+        blank, _signs = predictor.draw_signs(image, [])
+        return {"id": panel_id, "title": title, "image_base64": encode_jpeg(blank), "signs": [], "error": error}
+    annotated, signs = predictor.draw_signs(image, crops)
+    return {"id": panel_id, "title": title, "image_base64": encode_jpeg(annotated), "signs": signs, "error": ""}
+
+
+@app.post("/login", response_class=UnicodeJSONResponse)
+async def login_api(body: dict = Body(...)):
+    username = str(body.get("username", ""))
+    password = str(body.get("password", ""))
+    if len(username) != len(LOGIN_USERNAME) or len(password) != len(LOGIN_PASSWORD):
+        raise HTTPException(status_code=401, detail="用户名或密码不对")
+    name_ok = hmac.compare_digest(username, LOGIN_USERNAME)
+    password_ok = hmac.compare_digest(password, LOGIN_PASSWORD)
+    if not (name_ok and password_ok):
+        raise HTTPException(status_code=401, detail="用户名或密码不对")
+    token = jwt.encode(
+        {"sub": username, "exp": datetime.now(timezone.utc) + timedelta(hours=12)},
+        JWT_SECRET,
+        algorithm="HS256",
+    )
+    return {"token": token}
+
+
+@app.post("/predict", response_class=UnicodeJSONResponse)
+async def predict_api(file: UploadFile = File(...), authorization: str | None = Header(default=None)):
+    current_user(authorization)
+    predictor = STATE["predictor"]
+    if predictor is None:
+        raise HTTPException(status_code=503, detail="模型尚未加载")
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+    try:
+        image = Image.open(io.BytesIO(payload))
+        image.load()
+        image.close()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="无法解析为图片") from exc
+    try:
+        job_id = JOBS.enqueue(payload)
+    except redis.RedisError as exc:
+        raise HTTPException(status_code=503, detail="排队服务暂时不可用") from exc
+    return {"job_id": job_id}
+
+
+@app.get("/jobs/{job_id}", response_class=UnicodeJSONResponse)
+def job_api(job_id: str, authorization: str | None = Header(default=None)):
+    current_user(authorization)
+    try:
+        job = JOBS.snapshot(job_id)
+    except redis.RedisError as exc:
+        raise HTTPException(status_code=503, detail="排队服务暂时不可用") from exc
+    if job is None:
+        raise HTTPException(status_code=404, detail="没有这个编号")
+    return job
 
 
 def parse_args():
@@ -1039,6 +1299,7 @@ def parse_args():
     parser.add_argument("--yolo", default="weights/best.pt", help="YOLOv8 best.pt")
     parser.add_argument("--resnet", default="weights/best_model.pth", help="ResNet-18 best_model.pth")
     parser.add_argument("--data", default="weights/dataset.yaml", help="训练导出的 dataset.yaml")
+    parser.add_argument("--host", default="127.0.0.1", help="监听地址。本机调试用 127.0.0.1，容器里用 0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--det-conf", type=float, default=DET_CONF)
     parser.add_argument("--min-box", type=int, default=MIN_BOX)
@@ -1072,8 +1333,15 @@ def main():
         imgsz=args.imgsz,
         crop_pad=args.crop_pad,
     )
-    print(f"只在本机提供服务: http://127.0.0.1:{args.port}")
-    uvicorn.run(app, host="127.0.0.1", port=args.port)
+    if args.host == "127.0.0.1":
+        print(f"只在本机提供服务: http://127.0.0.1:{args.port}")
+    else:
+        print(f"监听 http://{args.host}:{args.port}")
+    where = os.environ.get("REDIS_URL", "").strip() or "本进程"
+    print(f"登录用户: {LOGIN_USERNAME}")
+    print(f"排队: {where}")
+    threading.Thread(target=job_worker, name="sign-jobs", daemon=True).start()
+    uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
